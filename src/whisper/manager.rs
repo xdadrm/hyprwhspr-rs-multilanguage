@@ -354,7 +354,7 @@ impl WhisperManager {
                 .ok_or_else(|| anyhow!("Audio path contains invalid UTF-8"))?,
             "--output-txt",
             "--language",
-            "en",
+            "auto",
             "--threads",
             &self.threads.to_string(),
             "--prompt",
