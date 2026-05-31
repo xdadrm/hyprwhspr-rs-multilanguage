@@ -2,7 +2,9 @@ use crate::paths::expand_tilde;
 use crate::transcription::DEFAULT_PROMPT;
 use anyhow::{anyhow, Context, Result};
 use jsonc_parser::{parse_to_serde_value, ParseOptions};
-use serde::{Deserialize, Deserializer, Serialize};
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -13,7 +15,12 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::watch;
 use tokio::time;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub fn generated_schema_json() -> Result<String> {
+    let schema = schemars::schema_for!(Config);
+    serde_json::to_string_pretty(&schema).context("Failed to serialize config JSON schema")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct ShortcutsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
@@ -31,7 +38,7 @@ impl Default for ShortcutsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct PasteHintsConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -50,7 +57,7 @@ impl Default for PasteHintsConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Config {
     #[serde(default = "default_primary_shortcut", skip_serializing)]
     pub primary_shortcut: String,
@@ -262,7 +269,7 @@ fn default_fast_vad_volatility_decrease_threshold() -> f32 {
     0.12
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct VadConfig {
     pub enabled: bool,
@@ -275,6 +282,7 @@ pub struct VadConfig {
         deserialize_with = "deserialize_vad_max_speech_s",
         skip_serializing_if = "is_f32_non_finite"
     )]
+    #[schemars(with = "Option<f32>")]
     pub max_speech_s: f32,
     pub speech_pad_ms: u32,
     pub samples_overlap: f32,
@@ -295,7 +303,7 @@ impl Default for VadConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FastVadProfileConfig {
     Quality,
@@ -310,7 +318,7 @@ impl Default for FastVadProfileConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct FastVadConfig {
     pub enabled: bool,
@@ -340,13 +348,13 @@ impl Default for FastVadConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranscriptionProvider {
     WhisperCpp,
     Groq,
     Gemini,
     Parakeet,
+    Custom(String),
 }
 
 impl Default for TranscriptionProvider {
@@ -356,17 +364,76 @@ impl Default for TranscriptionProvider {
 }
 
 impl TranscriptionProvider {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> Cow<'static, str> {
         match self {
-            TranscriptionProvider::WhisperCpp => "Local",
-            TranscriptionProvider::Groq => "Groq",
-            TranscriptionProvider::Gemini => "Gemini",
-            TranscriptionProvider::Parakeet => "Parakeet TDT",
+            TranscriptionProvider::WhisperCpp => Cow::Borrowed("Local"),
+            TranscriptionProvider::Groq => Cow::Borrowed("Groq"),
+            TranscriptionProvider::Gemini => Cow::Borrowed("Gemini"),
+            TranscriptionProvider::Parakeet => Cow::Borrowed("Parakeet TDT"),
+            TranscriptionProvider::Custom(name) => Cow::Owned(format!("Custom ({name})")),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl Serialize for TranscriptionProvider {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match self {
+            TranscriptionProvider::WhisperCpp => "whisper_cpp".to_string(),
+            TranscriptionProvider::Groq => "groq".to_string(),
+            TranscriptionProvider::Gemini => "gemini".to_string(),
+            TranscriptionProvider::Parakeet => "parakeet".to_string(),
+            TranscriptionProvider::Custom(name) => format!("custom.{name}"),
+        };
+        serializer.serialize_str(&value)
+    }
+}
+
+impl<'de> Deserialize<'de> for TranscriptionProvider {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "whisper_cpp" => Ok(TranscriptionProvider::WhisperCpp),
+            "groq" => Ok(TranscriptionProvider::Groq),
+            "gemini" => Ok(TranscriptionProvider::Gemini),
+            "parakeet" => Ok(TranscriptionProvider::Parakeet),
+            _ => value
+                .strip_prefix("custom.")
+                .filter(|name| !name.trim().is_empty())
+                .map(|name| TranscriptionProvider::Custom(name.to_string()))
+                .ok_or_else(|| {
+                    serde::de::Error::custom(format!("unknown transcription provider '{value}'"))
+                }),
+        }
+    }
+}
+
+impl JsonSchema for TranscriptionProvider {
+    fn schema_name() -> Cow<'static, str> {
+        "TranscriptionProvider".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "string",
+            "anyOf": [
+                {
+                    "enum": ["whisper_cpp", "groq", "gemini", "parakeet"]
+                },
+                {
+                    "pattern": "^custom\\.[A-Za-z0-9_-]+$"
+                }
+            ]
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct WhisperCppConfig {
     pub prompt: String,
@@ -394,7 +461,7 @@ impl Default for WhisperCppConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct GroqConfig {
     pub model: String,
@@ -412,7 +479,7 @@ impl Default for GroqConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct GeminiConfig {
     pub model: String,
@@ -439,7 +506,7 @@ fn default_parakeet_model_dir() -> String {
     "models/parakeet/parakeet-tdt-0.6b-v3-onnx".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct ParakeetConfig {
     pub model_dir: String,
@@ -455,7 +522,143 @@ impl Default for ParakeetConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomProviderKind {
+    #[serde(rename = "openai_audio_transcriptions")]
+    OpenAiAudioTranscriptions,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct ValueSource {
+    pub env: Option<String>,
+    pub value: Option<String>,
+}
+
+impl ValueSource {
+    pub fn resolve(&self, field_name: &str) -> Result<String> {
+        if let Some(env_name) = self
+            .env
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if let Ok(value) = env::var(env_name) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+
+        if let Some(value) = self
+            .value
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(value.to_string());
+        }
+
+        Err(anyhow!("{field_name} is required"))
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct SecretSource {
+    pub env: Option<String>,
+    pub file: Option<String>,
+    pub file_env: Option<String>,
+}
+
+impl SecretSource {
+    pub fn resolve(&self, field_name: &str) -> Result<Option<String>> {
+        if let Some(env_name) = self
+            .file_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if let Ok(path) = env::var(env_name) {
+                let trimmed = path.trim();
+                if !trimmed.is_empty() {
+                    return Self::read_secret_file(trimmed, field_name).map(Some);
+                }
+            }
+        }
+
+        if let Some(path) = self
+            .file
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            return Self::read_secret_file(path, field_name).map(Some);
+        }
+
+        if let Some(env_name) = self
+            .env
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if let Ok(value) = env::var(env_name) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Ok(Some(trimmed.to_string()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn read_secret_file(path: &str, field_name: &str) -> Result<String> {
+        let value = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {field_name} secret file: {path}"))?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!("{field_name} secret file is empty: {path}"));
+        }
+        Ok(trimmed.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct CustomProviderConfig {
+    pub kind: CustomProviderKind,
+    pub label: Option<String>,
+    pub base_url: ValueSource,
+    pub endpoint: String,
+    pub model: String,
+    pub audio_format: String,
+    pub api_key: SecretSource,
+    pub headers: HashMap<String, String>,
+    pub body: HashMap<String, String>,
+    pub prompt: String,
+}
+
+impl Default for CustomProviderConfig {
+    fn default() -> Self {
+        Self {
+            kind: CustomProviderKind::OpenAiAudioTranscriptions,
+            label: None,
+            base_url: ValueSource::default(),
+            endpoint: "/v1/audio/transcriptions".to_string(),
+            model: String::new(),
+            audio_format: "wav".to_string(),
+            api_key: SecretSource::default(),
+            headers: HashMap::new(),
+            body: HashMap::new(),
+            prompt: default_whisper_prompt(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(default)]
 pub struct TranscriptionConfig {
     pub provider: TranscriptionProvider,
@@ -465,6 +668,7 @@ pub struct TranscriptionConfig {
     pub groq: GroqConfig,
     pub gemini: GeminiConfig,
     pub parakeet: ParakeetConfig,
+    pub custom: HashMap<String, CustomProviderConfig>,
 }
 
 impl Default for TranscriptionConfig {
@@ -477,6 +681,7 @@ impl Default for TranscriptionConfig {
             groq: GroqConfig::default(),
             gemini: GeminiConfig::default(),
             parakeet: ParakeetConfig::default(),
+            custom: HashMap::new(),
         }
     }
 }

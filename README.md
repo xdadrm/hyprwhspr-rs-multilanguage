@@ -37,6 +37,7 @@ https://github.com/user-attachments/assets/bbbaa1c3-1a7e-4165-ad3d-27b7465e201a
 - Parakeet TDT (optional) - NVIDIA's local ASR model via ONNX
   - Run `./scripts/download-parakeet-tdt.sh` to download model files (~1.2GB)
   - Very fast, but not as accurate as whisper or Gemini
+- For custom OpenAI-compatible providers, see [configuration](#configuration) below
 
 ## Features
 
@@ -103,16 +104,17 @@ Notes:
 You can install the `hyprwhspr-rs` package from nixpkgs.
 
 With NixOS:
+
 ```nix
 {
   # required to listen for keyboard shortcuts
   users.users.<username>.extraGroups = [ "input" ];
-  
+
   # have it auto start as a systemd unit with
-  services.hyprwhspr-rs.enable = true; 
+  services.hyprwhspr-rs.enable = true;
   # or just add it to your systemPackages
   environment.systemPackages = [ pkgs.hyprwhspr-rs ];
-  
+
   # optional: to enable cuda (for AMD do `rocmSupport` instead of `cudaSupport`)
   # cuda is unfree so not in the default nixos build caches
   # I highly recommend adding the cuda build cache to your nixconfig https://discourse.nixos.org/t/cuda-cache-for-nix-community/56038
@@ -121,13 +123,13 @@ With NixOS:
     package = pkgs.hyprwhspr-rs.override {
       # to optimize build time you can skip enabling cudaSupport for one of these two
       # for whisper do whisper-cpp, for NVIDIA Parakeet do onnxruntime
-      whispercpp = pkgs.whisper-cpp.override { cudaSupport = true; }; 
+      whispercpp = pkgs.whisper-cpp.override { cudaSupport = true; };
       onnxruntime = pkgs.onnxruntime.override { cudaSupport = true; };
     };
   };
   # you can also enable cuda/rocm globally, but this will increase the build time for your entire system if you dont add the cuda build cache
   nixpkgs.config.cudaSupport = true;
-  
+
   # if you use groq or gemini for transcription, you can autoload their keys with
   services.hyprwhspr-rs = {
     enable = true;
@@ -151,10 +153,11 @@ With NixOS:
 ```
 
 ## Configuration
+
 <details>
     <summary>
         <strong>Example hyprland bindings config</strong>
-        <p>Configure in, e.g., ~/.config/hypr/hyprland.conf</p>
+        <p>Configure in, e.g., <code>~/.config/hypr/hyprland.conf</code></p>
     </summary>
 
 ```ini
@@ -165,15 +168,18 @@ bindr = ALT, GRAVE, exec, hyprwhspr-rs record stop
 # tap
 bind = ALT, SPACE, exec, hyprwhspr-rs record toggle
 ```
+
 </details>
 <details>
   <summary>
     <strong>Example hyprwhspr-rs config</strong>
-    <p>Configure in ~/.config/hyprwhspr-rs/config.jsonc</p>
+    <p>Configure in <code>~/.config/hyprwhspr-rs/config.jsonc</code></p>
+    <p>Starting with <code>v0.28.0</code>, you may use <code>"$schema": "https://raw.githubusercontent.com/better-slop/hyprwhspr-rs/&lt;vX.X.X|main&gt;/config/schema.json"</code> to validate your config.</p>
   </summary>
 
 ```jsonc
 {
+  "$schema": "https://raw.githubusercontent.com/better-slop/hyprwhspr-rs/main/config/schema.json",
   "shortcuts": {
     "press": "SUPER+ALT+D",
     "hold": "SUPER+ALT+CTRL",
@@ -221,7 +227,7 @@ bind = ALT, SPACE, exec, hyprwhspr-rs record toggle
     "volatility_decrease_threshold": 0.12, // Relax profile when toggles stay below this ratio
   },
   "transcription": {
-    "provider": "whisper_cpp", // whisper_cpp | groq | gemini | parakeet
+    "provider": "whisper_cpp", // whisper_cpp | groq | gemini | parakeet | custom.<name>
     "request_timeout_secs": 45,
     "max_retries": 2,
     "whisper_cpp": {
@@ -265,6 +271,28 @@ bind = ALT, SPACE, exec, hyprwhspr-rs record toggle
       "model_dir": "models/parakeet/parakeet-tdt-0.6b-v3-onnx", // Relative to $XDG_DATA_HOME/hyprwhspr-rs (or ~/.local/share/hyprwhspr-rs)
       "prompt": "Transcribe as technical documentation with proper capitalization, acronyms, and technical terminology. Do not add punctuation.",
     },
+    // "provider": "custom.remote_whisper",
+    "custom": {
+      "remote_whisper": {
+        "kind": "openai_audio_transcriptions",
+        "label": "Remote whisper.cpp",
+        "base_url": {
+          "env": "HYPRWHSPR_REMOTE_WHISPER_BASE_URL",
+          "value": "http://localhost:8080",
+        },
+        "endpoint": "/v1/audio/transcriptions",
+        "model": "whisper-large-v3",
+        "audio_format": "wav", // wav | flac; wav works with whisper.cpp server by default
+        "api_key": {
+          "env": "HYPRWHSPR_REMOTE_WHISPER_API_KEY",
+          "file": "/run/secrets/hyprwhspr-remote-key",
+          "file_env": "HYPRWHSPR_REMOTE_WHISPER_API_KEY_FILE",
+        },
+        "headers": {},
+        "body": {},
+        "prompt": "Transcribe as technical documentation with proper capitalization, acronyms, and technical terminology. Do not add punctuation.",
+      },
+    },
   },
 }
 ```
@@ -283,7 +311,40 @@ Use <code>transcription.provider</code> in <code>~/.config/hyprwhspr-rs/config.j
 
 - groq provider <strong>requires</strong>: <code>GROQ_API_KEY</code>
 - gemini provider <strong>requires</strong>: <code>GEMINI_API_KEY</code>
-- whisper_cpp (whisper-cli) <strong>does not require an API key; the binary is discovered via <code>PATH</code> and managed locations under <code>$XDG_DATA_HOME</code> / <code>$HOME</code></strong>
+- whisper_cpp (whisper-cli) <strong>does not require an API key; the binary is discovered via <code>PATH</code> and managed locations under <code> $XDG_DATA_HOME </code> / <code> $HOME </code> </strong>
+- custom providers use <code>transcription.custom.&lt;name&gt;.api_key</code>. Secret resolution prefers <code>file_env</code>, then <code>file</code>, then <code>env</code>. Empty/missing keys are allowed for no-auth local servers.
+
+#### Custom OpenAI-compatible providers
+
+Set <code>transcription.provider</code> to <code>custom.&lt;name&gt;</code>, then define <code>transcription.custom.&lt;name&gt;</code>.
+
+```jsonc
+"transcription": {
+  "provider": "custom.remote_whisper",
+  "custom": {
+    "remote_whisper": {
+      "kind": "openai_audio_transcriptions",
+      "label": "Remote whisper.cpp",
+      "base_url": {
+        "env": "HYPRWHSPR_REMOTE_WHISPER_BASE_URL",
+        "value": "http://localhost:8080"
+      },
+      "endpoint": "/v1/audio/transcriptions",
+      "model": "whisper-large-v3",
+      "api_key": {
+        "env": "HYPRWHSPR_REMOTE_WHISPER_API_KEY",
+        "file": "/run/secrets/hyprwhspr-remote-key",
+        "file_env": "HYPRWHSPR_REMOTE_WHISPER_API_KEY_FILE"
+      },
+      "headers": {},
+      "body": {},
+      "prompt": "Transcribe technical notes."
+    }
+  }
+}
+```
+
+For <code>whisper.cpp/examples/server</code>, start the server with <code>--inference-path /v1/audio/transcriptions</code> or set <code>endpoint</code> to <code>/inference</code>. Custom providers default to WAV uploads so the server does not need <code>--convert</code>.
 
 #### Recommended setup (systemd user service)
 
@@ -307,7 +368,7 @@ Use <code>transcription.provider</code> in <code>~/.config/hyprwhspr-rs/config.j
 <details>
   <summary>
     <strong>Earshot VAD trimming</strong> (recommended)
-    <p>The default build ships with the impressive and lightweight <a href="https://crates.io/crates/earshot">earshot</a> VoiceActivityDetector baked in. Toggle <code>fast_vad.enabled</code> in your config to trim silence before any provider (whisper.cpp, Groq, Gemini) sees the audio. Extremely useful for lowering costs and increasing speed.</p>
+    <p>The default build ships with the impressive and lightweight <a href="https://crates.io/crates/earshot">earshot</a> VoiceActivityDetector baked in. Toggle <code>fast_vad.enabled</code> in your config to trim silence before any provider sees the audio. Useful for lowering costs and increasing speed.</p>
   </summary>
 
 #### Configuring `fast_vad`
@@ -348,6 +409,7 @@ recompiling.
 4. Run using:
    - pretty logs: `RUST_LOG=debug ./target/release/hyprwhspr-rs`
    - production release: `./target/release/hyprwhspr-rs`
+5. On schema changes, run `cargo run --bin generate-schema -- config/schema.json` and commit.
 
 <details>
   <summary>
